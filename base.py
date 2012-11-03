@@ -1,4 +1,5 @@
 #coding:utf-8
+import logging
 import base64
 import json
 from snakemq.link import Link
@@ -7,10 +8,30 @@ from snakemq.messaging import Messaging
 from snakemq.packeter import Packeter
 import zlib
 
-__author__ = 'Administrator'
+#=================================================== setup logger
+logging.basicConfig(filename="spider_farm.log", level=logging.DEBUG)
+
+class SnakeFilter(logging.Filter):
+    def filter(self, record):
+        return not record.name.startswith('snakemq')
+
+formatter = logging.Formatter('%(name)-8s %(levelname)-8s: %(message)s')
+
+console = logging.StreamHandler()
+console.setFormatter(formatter)
+console.setLevel(logging.DEBUG)
+console.addFilter(SnakeFilter())
+
+logging.getLogger().addHandler(console)
+
+log = logging.getLogger('base')
+#=====================================================
+
+SRC_MID64 = 'src_mid64'
 
 class MessageQueue(object):
     def __init__(self, my_ident):
+        self.me = my_ident
         self.link = Link()
         self.packeter = Packeter(self.link)
         self.messaging = Messaging(my_ident, '', self.packeter)
@@ -31,18 +52,31 @@ class MessageQueue(object):
     def cleanup(self):
         self.link.cleanup()
 
-    def send_message(self, ident, message, ttl=600):
-        message = Message(bytes(message), ttl)
-        self.messaging.send_message(ident, message)
+    def on_receive_json(self, ident, obj, mid64):
+        pass
 
-    def send_json(self, ident, obj):
-        self.send_message(ident, json.dumps(obj))
+    def send_json(self, ident, obj, ttl=600):
+        _json = json.dumps(obj)
+        message = Message(bytes(_json), ttl)
+        log.debug('send_json -> [%s]: %s %s', ident, obj, repr(get_mid64(message)))
+        self.messaging.send_message(ident, message)
+        return message
 
     def on_connect(self, conn, ident):
         pass
 
     def on_recv(self, conn, ident, message):
-        pass
+        log.debug('on_recv <- [%s]: %s', ident, message)
+        mid64 = get_mid64(message)
+        try:
+            obj = json.loads(message.data)
+            if not obj.has_key('src_mid64'):
+                obj['src_mid64'] = mid64
+            self.on_receive_json(ident, obj, mid64)
+        except ValueError:
+            self.send_json(ident, {'error': 'invalid_json', 'message': str(message.data), 'src_mid64': mid64})
+            log.error('invalid_json: %s', message.data)
+
 
     def on_disconnect(self, conn, ident):
         pass
@@ -72,7 +106,10 @@ def from_zip64(s):
     return from_zip(bytes)
 
 
-if __name__ == '__main__':
+def get_mid64(message):
+    return base64.encodestring(message.uuid)
 
+
+if __name__ == '__main__':
     b = to_zip64(u'hello你好')
     print from_zip64(b)

@@ -1,41 +1,38 @@
-from copy import deepcopy
-import json
+#coding:utf-8
 import re
-from bson import ObjectId, Binary
-from pymongo.errors import OperationFailure
+from copy import deepcopy
 
 import requests
 import pymongo
+from bson import ObjectId, Binary
+from pymongo.errors import OperationFailure
 
-from base import MessageQueue
-from base import to_zip64, to_zip
+from base import MessageQueue, to_zip, to_zip64, logging, SRC_MID64
+
+log = logging.getLogger('spider')
 
 
-class SpiderClient(MessageQueue):
+class SpiderWorker(MessageQueue):
     def __init__(self, ident):
-        super(SpiderClient, self).__init__(ident)
+        super(SpiderWorker, self).__init__(ident)
         self.crawl_handler = CrawlHandler(self)
 
-    def on_recv(self, conn, ident, message):
-        try:
-            obj = json.loads(message.data)
-            self.process_message(ident, obj)
-        except ValueError:
-            print 'process_message exception:', message.data
-            self.send_json(ident, {'status': 'error', 'info': 'unable_to_json_loads', 'request': message.data.decode('utf-8') })
-
-    def process_message(self, caller, request):
+    def on_receive_json(self, caller, request, mid64):
         _type = request.get('type')
+        log.debug('receive cmd: %s', request)
         if _type == 'crawl':
             self.crawl_handler.process(caller, request)
+        if _type == 'who':
+            self.send_json(caller, {'role': 'worker', SRC_MID64: request[SRC_MID64]})
         else:
-            print request
+            log.warning('invalid cmd: %s - %s', _type, request)
 
 
 class CrawlHandler(object):
     optional_fields = [
-        'params', 'data', 'headers', 'cookies', 'files', 'auth', 'timeout','prefetch', 'cert',
-        'allow_redirects', 'proxies', 'return_response', 'session', 'config', 'verify',
+        'params', 'data', 'headers', 'cookies', 'files', 'auth',
+        'timeout','prefetch', 'cert', 'allow_redirects', 'proxies',
+        'return_response', 'session', 'config', 'verify',
     ]
     def __init__(self, parent):
         self.parent = parent
@@ -45,19 +42,19 @@ class CrawlHandler(object):
     def process(self, caller, request):
         if not request.has_key('url'):
             return self.parent.send_json(caller,
-                {'status': 'error', 'info': "field required: url", 'request': request})
+                {'status': 'error', 'info': "field required: url", SRC_MID64: request[SRC_MID64]})
 
         url = request.get('url')
         if url.startswith('http://'):
             kwargs = deepcopy(request)
             content = self.crawl(**kwargs)
             return self.parent.send_json(caller,
-                {'status': 'ok', 'zip64': to_zip64(content), 'request': request})
+                {'status': 'ok', 'zip64': to_zip64(content), SRC_MID64: request[SRC_MID64]})
         elif url.startswith('mongodb://'):
             return self.process_mongo_url(caller, request)
         else:
             return self.parent.send_json(caller,
-                {'status': 'error', 'info': 'invalid url:' + url, 'request': request})
+                {'status': 'error', 'info': 'invalid url:' + url, SRC_MID64: request[SRC_MID64]})
 
     def crawl(self, **kwargs):
         url = kwargs.get('url')
@@ -82,7 +79,8 @@ class CrawlHandler(object):
 
         m = re.match(pattern, url)
         if not m:
-            return self.parent.send_json(caller, {"status": 'error', 'info': 'invalid url:' + url, 'request': request})
+            return self.parent.send_json(caller,
+                {"status": 'error', 'info': 'invalid url:' + url, SRC_MID64: request[SRC_MID64]})
         args = m.groupdict()
 
         # conn
@@ -95,7 +93,8 @@ class CrawlHandler(object):
         # db
         db_name = args.get('db')
         if not db_name:
-            return self.parent.send_json(caller, {"status": 'error', 'info': 'require db_name:' + url, 'request': request})
+            return self.parent.send_json(caller,
+                {"status": 'error', 'info': 'require db_name:' + url, SRC_MID64: request[SRC_MID64]})
         if not self.dbs.has_key((host, port, db_name)):
             db = conn[db_name]
             username = args.get('username')
@@ -112,20 +111,24 @@ class CrawlHandler(object):
         # doc
         oid = str(args.get('oid'))
         if not ObjectId.is_valid(oid):
-            return self.parent.send_json(caller, {"status": 'error', 'info': 'oid not valid:' + url, 'request': request})
+            return self.parent.send_json(caller,
+                {"status": 'error', 'info': 'oid not valid:' + url, SRC_MID64: request[SRC_MID64]})
         _id = ObjectId(oid)
         try:
             doc = coll.find_one(_id)
         except OperationFailure:
             self.dbs.pop((host, port, db_name))
-            return self.parent.send_json(caller, {"status": 'error', 'info': 'auth failed:' + url, 'request': request})
+            return self.parent.send_json(caller,
+                {"status": 'error', 'info': 'auth failed:' + url, SRC_MID64: request[SRC_MID64]})
 
         if not doc:
-            return self.parent.send_json(caller, {"status": 'error', 'info': 'oid not found:' + url, 'request': request})
+            return self.parent.send_json(caller,
+                {"status": 'error', 'info': 'oid not found:' + url, SRC_MID64: request[SRC_MID64]})
 
         content = self.crawl(**doc)
         coll.update({'_id': _id}, {'$set': {'zip': Binary(to_zip(content)), 'status': 'ok'}})
-        return self.parent.send_json(caller, {'status': 'ok', 'json': request })
+        return self.parent.send_json(caller, 
+            {'status': 'ok',  SRC_MID64: request[SRC_MID64] })
 
 
 
@@ -138,7 +141,7 @@ if __name__ == '__main__':
         my_ident = args[0]
         ip, port = args[1].split(':')
 
-        client = SpiderClient(my_ident)
+        client = SpiderWorker(my_ident)
         client.connect(ip, int(port))
         client.loop()
 
