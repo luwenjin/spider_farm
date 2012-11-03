@@ -32,10 +32,12 @@ SRC_MID64 = 'src_mid64'
 class MessageQueue(object):
     def __init__(self, my_ident):
         self.me = my_ident
+
         self.link = Link()
         self.packeter = Packeter(self.link)
         self.messaging = Messaging(my_ident, '', self.packeter)
 
+        self.link.on_loop_pass.add(self.on_loop)
         self.messaging.on_message_recv.add(self.on_recv)
         self.messaging.on_disconnect.add(self.on_disconnect)
         self.messaging.on_connect.add(self.on_connect)
@@ -70,8 +72,6 @@ class MessageQueue(object):
         mid64 = get_mid64(message)
         try:
             obj = json.loads(message.data)
-            if not obj.has_key('src_mid64'):
-                obj['src_mid64'] = mid64
             self.on_receive_json(ident, obj, mid64)
         except ValueError:
             self.send_json(ident, {'error': 'invalid_json', 'message': str(message.data), 'src_mid64': mid64})
